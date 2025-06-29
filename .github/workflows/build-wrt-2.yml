@@ -45,24 +45,29 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.step1_full_artifact }}
-          path: ./step1_full
+          path: ./
+
+      - name: Download Config Artifact (if exists)
+        uses: actions/download-artifact@v4
+        with:
+          name: config-${{ env.BUILD_DATE }}-${{ inputs.model }}
+          path: ./config_artifact
+        continue-on-error: true
 
       - name: Restore Build Environment
         run: |
-          # 恢复完整的构建环境
-          if [ -d "./step1_full/action_build" ]; then
-            cp -r ./step1_full/action_build ./action_build
-            cp ./step1_full/repo_flag ./ 2>/dev/null || true
-            echo "构建环境已恢复"
+          # 检查构建环境
+          if [ -d "./action_build" ]; then
+            echo "构建环境已就绪"
           else
             echo "未找到Step 1的完整项目，请先运行Step 1"
             exit 1
           fi
           
           # 如果存在config.zip，解压并恢复用户配置
-          if [ -f "./step1_full/config.zip" ]; then
+          if [ -f "./config_artifact/config.zip" ]; then
             echo "发现配置文件备份，解压并恢复..."
-            unzip -o ./step1_full/config.zip -d ./config_backup
+            unzip -o ./config_artifact/config.zip -d ./config_backup
             if [ -f "./config_backup/.config.user_modified" ]; then
               cp ./config_backup/.config.user_modified ./action_build/.config
               echo "用户配置文件已恢复"

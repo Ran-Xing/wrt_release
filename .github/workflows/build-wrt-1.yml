@@ -163,13 +163,13 @@ jobs:
             echo "CONFIG_CHANGED=false" >> $GITHUB_ENV
           fi
 
-      - name: Upload Build Info Artifacts
+      - name: Upload Config Artifacts (if changed)
+        if: env.CONFIG_CHANGED == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: build-info-${{ env.BUILD_DATE }}-${{ inputs.model }}
-          path: |
-            ./repo_flag
-          retention-days: 1
+          name: config-${{ env.BUILD_DATE }}-${{ inputs.model }}
+          path: ./config.zip
+          retention-days: 7
 
       - name: Upload Full Project for Step 2
         uses: actions/upload-artifact@v4
@@ -178,5 +178,4 @@ jobs:
           path: |
             ./action_build/
             ./repo_flag
-            ./config.zip
           retention-days: 1 
