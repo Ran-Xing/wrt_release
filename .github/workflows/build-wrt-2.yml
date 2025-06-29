@@ -1,0 +1,119 @@
+name: Build WRT - Step 2 (Download Dependencies)
+run-name: Build Step 2 - ${{ inputs.model }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        required: true
+        description: Device Model
+        type: choice
+        default: jdcloud_ipq60xx_immwrt
+        options:
+          - jdcloud_ipq60xx_immwrt
+      runs-on:
+        required: true
+        description: Runs on...
+        type: choice
+        default: ubuntu-22.04
+        options:
+          - ubuntu-20.04
+          - ubuntu-22.04
+      step1_full_artifact:
+        required: true
+        description: Step 1 Full Project Artifact Name
+        type: string
+        default: "step1-full-"
+      has_config_changes:
+        required: false
+        description: Whether user modified config in Step 1
+        type: boolean
+        default: false
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  download_dependencies:
+    runs-on: ${{ inputs.runs-on }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialization Values
+        run: |
+          export BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+
+      - name: Download Step 1 Full Project
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.step1_full_artifact }}
+          path: ./step1_full
+
+      - name: Restore Build Environment
+        run: |
+          # 恢复完整的构建环境
+          if [ -d "./step1_full/action_build" ]; then
+            cp -r ./step1_full/action_build ./action_build
+            cp ./step1_full/repo_flag ./ 2>/dev/null || true
+            echo "构建环境已恢复"
+          else
+            echo "未找到Step 1的完整项目，请先运行Step 1"
+            exit 1
+          fi
+          
+          # 如果存在config.zip，解压并恢复用户配置
+          if [ -f "./step1_full/config.zip" ]; then
+            echo "发现配置文件备份，解压并恢复..."
+            unzip -o ./step1_full/config.zip -d ./config_backup
+            if [ -f "./config_backup/.config.user_modified" ]; then
+              cp ./config_backup/.config.user_modified ./action_build/.config
+              echo "用户配置文件已恢复"
+            fi
+          fi
+
+      - name: Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./action_build/.ccache
+            ./action_build/staging_dir
+            ./action_build/dl
+          key: ${{ inputs.runs-on }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}-step2
+          restore-keys: |
+            ${{ inputs.runs-on }}-${{ hashFiles('**/repo_flag') }}-
+
+      - name: Refresh the cache
+        run: |
+          if [ -d "./action_build/staging_dir" ]; then
+            find "./action_build/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r dir; do
+                find "$dir" -type f -exec touch {} +
+            done
+          fi
+
+      - name: Make Download (with cache optimization)
+        run: |
+          cd ./action_build
+          # 使用多线程下载，利用缓存加速
+          # 如果dl目录已存在，make download会跳过已下载的文件
+          make download -j$(($(nproc) * 2))
+
+      - name: Upload Step 2 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: step2-${{ env.BUILD_DATE }}-${{ inputs.model }}
+          path: |
+            ./action_build/.config
+            ./action_build/.config.old
+            ./action_build/dl
+            ./repo_flag
+          retention-days: 1
+
+      - name: Cache Status
+        run: |
+          echo "========cache status========"
+          echo "ccache: $(du -sh ./action_build/.ccache 2>/dev/null | cut -f 1 || echo 'N/A')"
+          echo "staging: $(du -sh ./action_build/staging_dir 2>/dev/null | cut -f 1 || echo 'N/A')"
+          echo "dl: $(du -sh ./action_build/dl 2>/dev/null | cut -f 1 || echo 'N/A')" 

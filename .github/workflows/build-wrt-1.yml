@@ -1,0 +1,190 @@
+name: Build WRT - Step 1 (Preparation & SSH & Config Backup)
+run-name: Build Step 1 - ${{ inputs.model }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        required: true
+        description: Device Model
+        type: choice
+        default: jdcloud_ipq60xx_immwrt
+        options:
+          - jdcloud_ipq60xx_immwrt
+      runs-on:
+        required: true
+        description: Runs on...
+        type: choice
+        default: ubuntu-22.04
+        options:
+          - ubuntu-20.04
+          - ubuntu-22.04
+      enable_ssh:
+        required: false
+        description: Enable SSH connection for menuconfig
+        type: boolean
+        default: true
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  prepare:
+    runs-on: ${{ inputs.runs-on }}
+
+    steps:
+      - name: Maximize build space
+        uses: AdityaGarg8/remove-unwanted-software@v5
+        with:
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+          remove-large-packages: "true"
+          remove-cached-tools: "true"
+          remove-swapfile: "true"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo -E apt -yqq install dos2unix
+          sudo -E apt -yqq install libfuse-dev
+          sudo -E apt -yqq autoremove --purge
+          sudo -E apt -yqq autoclean
+          sudo -E apt -yqq clean
+          sudo -E systemctl daemon-reload
+          sudo -E timedatectl set-timezone "Asia/Shanghai"
+
+      - name: Initialization Values
+        run: |
+          export BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+          echo "STEP1_COMPLETED=true" >> $GITHUB_ENV
+
+      - name: Pre Clone
+        run: ./pre_clone_action.sh ${{ inputs.model }}
+
+      - name: Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./action_build/.ccache
+            ./action_build/staging_dir
+          key: ${{ inputs.runs-on }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}-step1
+          restore-keys: |
+            ${{ inputs.runs-on }}-${{ hashFiles('**/repo_flag') }}-
+
+      - name: Refresh the cache
+        run: |
+          if [ -d "./action_build/staging_dir" ]; then
+            find "./action_build/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r dir; do
+                find "$dir" -type f -exec touch {} +
+            done
+          fi
+
+      - name: Copy Config File
+        run: |
+          CONFIG_FILE="./deconfig/${{ inputs.model }}.config"
+          cp -f "$CONFIG_FILE" "./action_build/.config"
+
+      - name: Run update.sh (feeds and packages setup)
+        run: |
+          # 读取INI文件获取参数
+          INI_FILE="./compilecfg/${{ inputs.model }}.ini"
+          read_ini_by_key() {
+              local key=$1
+              awk -F"=" -v key="$key" '$1 == key {print $2}' "$INI_FILE"
+          }
+          
+          REPO_URL=$(read_ini_by_key "REPO_URL")
+          REPO_BRANCH=$(read_ini_by_key "REPO_BRANCH")
+          REPO_BRANCH=${REPO_BRANCH:-main}
+          COMMIT_HASH=$(read_ini_by_key "COMMIT_HASH")
+          COMMIT_HASH=${COMMIT_HASH:-none}
+          
+          # 执行update.sh
+          ./update.sh "$REPO_URL" "$REPO_BRANCH" "./action_build" "$COMMIT_HASH"
+
+      - name: SSH connection to Actions (before defconfig)
+        uses: mxschmitt/action-tmate@v3
+        if: github.event_name == 'workflow_dispatch' && inputs.enable_ssh == true
+        timeout-minutes: 180
+        with:
+          limit-access-to-actor: true
+
+      - name: Backup user modified config
+        run: |
+          mkdir config_backup
+          \cp -rf ./action_build/.config config_backup/.config.user_modified
+          \cp -rf ./action_build/.config.old config_backup/.config.user_modified.old
+
+      - name: Make defconfig
+        run: |
+          cd ./action_build
+          make defconfig
+          \cp -rf .config ../config_backup/.config.defconfig
+          \cp -rf .config.old ../config_backup/.config.defconfig.old
+          cd ..
+          zip -r config.zip config_backup/
+
+      - name: Handle x86_64 specific config
+        run: |
+          cd ./action_build
+          CONFIG_FILE="../deconfig/${{ inputs.model }}.config"
+          if grep -qE "^CONFIG_TARGET_x86_64=y" "$CONFIG_FILE"; then
+            DISTFEEDS_PATH="./package/emortal/default-settings/files/99-distfeeds.conf"
+            if [ -d "${DISTFEEDS_PATH%/*}" ] && [ -f "$DISTFEEDS_PATH" ]; then
+              sed -i 's/aarch64_cortex-a53/x86_64/g' "$DISTFEEDS_PATH"
+            fi
+          fi
+
+      - name: Check config changes
+        run: |
+          ORIGINAL_CONFIG="./deconfig/${{ inputs.model }}.config"
+          MODIFIED_CONFIG="./action_build/.config"
+          
+          if [ -f "$MODIFIED_CONFIG" ]; then
+            echo "比较原始配置文件和用户修改后的配置文件..."
+            if diff "$ORIGINAL_CONFIG" "$MODIFIED_CONFIG" > /dev/null; then
+              echo "配置文件未发生变更"
+              echo "CONFIG_CHANGED=false" >> $GITHUB_ENV
+            else
+              echo "配置文件已发生变更"
+              echo "CONFIG_CHANGED=true" >> $GITHUB_ENV
+            fi
+          else
+            echo "未找到用户修改的配置文件，可能用户未进行SSH配置"
+            echo "CONFIG_CHANGED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Upload Config Artifacts (if changed)
+        if: env.CONFIG_CHANGED == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-${{ env.BUILD_DATE }}-${{ inputs.model }}
+          path: ./config.zip
+          retention-days: 7
+
+      - name: Upload Build Info Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info-${{ env.BUILD_DATE }}-${{ inputs.model }}
+          path: |
+            ./repo_flag
+          retention-days: 1
+
+      - name: Upload Full Project for Step 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: step1-full-${{ env.BUILD_DATE }}-${{ inputs.model }}
+          path: |
+            ./action_build/
+            ./repo_flag
+            ./config.zip
+          retention-days: 1 

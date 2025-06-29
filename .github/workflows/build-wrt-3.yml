@@ -1,0 +1,166 @@
+name: Build WRT - Step 3 (Final Build)
+run-name: Build Step 3 - ${{ inputs.model }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        required: true
+        description: Device Model
+        type: choice
+        default: jdcloud_ipq60xx_immwrt
+        options:
+          - jdcloud_ipq60xx_immwrt
+      runs-on:
+        required: true
+        description: Runs on...
+        type: choice
+        default: ubuntu-22.04
+        options:
+          - ubuntu-20.04
+          - ubuntu-22.04
+      step2_artifact:
+        required: true
+        description: Step 2 Artifact Name
+        type: string
+        default: "step2-"
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  final_build:
+    runs-on: ${{ inputs.runs-on }}
+
+    steps:
+      - name: Maximize build space
+        uses: AdityaGarg8/remove-unwanted-software@v5
+        with:
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+          remove-large-packages: "true"
+          remove-cached-tools: "true"
+          remove-swapfile: "true"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialization Values
+        run: |
+          export BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+
+      - name: Download Step 2 Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.step2_artifact }}
+          path: ./step2_artifacts
+
+      - name: Restore Build Environment
+        run: |
+          # 恢复构建环境
+          if [ -f "./step2_artifacts/.config" ]; then
+            mkdir -p ./action_build
+            cp -r ./step2_artifacts/.config ./action_build/
+            cp -r ./step2_artifacts/.config.old ./action_build/ 2>/dev/null || true
+            cp -r ./step2_artifacts/dl ./action_build/ 2>/dev/null || true
+            cp ./step2_artifacts/repo_flag ./ 2>/dev/null || true
+          else
+            echo "未找到Step 2的构建文件，请先运行Step 2"
+            exit 1
+          fi
+
+      - name: Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./action_build/.ccache
+            ./action_build/staging_dir
+            ./action_build/dl
+          key: ${{ inputs.runs-on }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}-step3
+          restore-keys: |
+            ${{ inputs.runs-on }}-${{ hashFiles('**/repo_flag') }}-
+
+      - name: Refresh the cache
+        run: |
+          if [ -d "./action_build/staging_dir" ]; then
+            find "./action_build/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r dir; do
+                find "$dir" -type f -exec touch {} +
+            done
+          fi
+
+      - name: Pre Clone (if needed)
+        run: |
+          # 如果action_build目录不存在，重新克隆
+          if [ ! -d "./action_build" ]; then
+            ./pre_clone_action.sh ${{ inputs.model }}
+          fi
+
+      - name: Handle x86_64 specific config
+        run: |
+          cd ./action_build
+          CONFIG_FILE="../deconfig/${{ inputs.model }}.config"
+          if grep -qE "^CONFIG_TARGET_x86_64=y" "$CONFIG_FILE"; then
+            DISTFEEDS_PATH="./package/emortal/default-settings/files/99-distfeeds.conf"
+            if [ -d "${DISTFEEDS_PATH%/*}" ] && [ -f "$DISTFEEDS_PATH" ]; then
+              sed -i 's/aarch64_cortex-a53/x86_64/g' "$DISTFEEDS_PATH"
+            fi
+          fi
+
+      - name: Clean old firmware
+        run: |
+          cd ./action_build
+          TARGET_DIR="./bin/targets"
+          if [[ -d $TARGET_DIR ]]; then
+            find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec rm -f {} +
+          fi
+
+      - name: Build Firmware
+        run: |
+          cd ./action_build
+          # 使用多线程编译，失败时降级到单线程
+          make -j$(($(nproc) + 1)) || make -j1 V=s
+
+      - name: Collect Firmware
+        run: |
+          cd ./action_build
+          FIRMWARE_DIR="../firmware"
+          \rm -rf "$FIRMWARE_DIR"
+          mkdir -p "$FIRMWARE_DIR"
+          TARGET_DIR="./bin/targets"
+          find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec cp -f {} "$FIRMWARE_DIR/" \;
+          \rm -f "$FIRMWARE_DIR/Packages.manifest" 2>/dev/null
+
+      - name: Clean build directory
+        run: |
+          cd ./action_build
+          make clean
+
+      - name: Delete Old Cache
+        run: |
+          # 获取缓存列表并删除
+          gh cache list --key ${{ inputs.runs-on }}-${{ hashFiles('**/repo_flag') }}- --json key --jq '.[] | .key' | while read -r key; do
+            gh cache delete "$key"
+          done
+          # 输出缓存状态
+          echo "========cache status========"
+          echo "ccache: $(du -sh ./action_build/.ccache 2>/dev/null | cut -f 1 || echo 'N/A')"
+          echo "staging: $(du -sh ./action_build/staging_dir 2>/dev/null | cut -f 1 || echo 'N/A')"
+          echo "dl: $(du -sh ./action_build/dl 2>/dev/null | cut -f 1 || echo 'N/A')"
+
+      - name: Machine Information
+        run: |
+          echo "=============================================="
+          lscpu | grep -E "name|Core|Thread"
+          echo "=============================================="
+          df -h
+          echo "=============================================="
+
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUILD_DATE }}_${{ inputs.model }}
+          path: ./firmware/*.* 
