@@ -24,11 +24,6 @@ on:
         description: Step 1 Full Project Artifact Name
         type: string
         default: "step1-full-"
-      has_config_changes:
-        required: false
-        description: Whether user modified config in Step 1
-        type: boolean
-        default: false
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

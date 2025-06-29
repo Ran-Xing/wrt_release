@@ -21,12 +21,6 @@
 - 上传完整项目供Step 2使用
 
 **生成的Artifacts：**
-- `config-YYYY.MM.DD_HH.MM.SS-jdcloud_ipq60xx_immwrt`: 配置文件（仅在有变更时生成，保留7天）
-  - `config.zip`: 包含所有配置文件的压缩包
-    - `.config.user_modified`: 用户修改后的配置文件
-    - `.config.user_modified.old`: 用户修改后的备份文件
-    - `.config.defconfig`: make defconfig后的配置文件
-    - `.config.defconfig.old`: make defconfig后的备份文件
 - `build-info-YYYY.MM.DD_HH.MM.SS-jdcloud_ipq60xx_immwrt`: 构建信息（保留1天）
   - `repo_flag`: 代码仓库标识（用于缓存键生成和缓存管理）
 - `step1-full-YYYY.MM.DD_HH.MM.SS-jdcloud_ipq60xx_immwrt`: 完整项目（保留1天）
@@ -52,7 +46,6 @@
 
 **输入参数：**
 - `step1_full_artifact`: Step 1完整项目artifact名称
-- `has_config_changes`: 是否在Step 1中修改了配置（可选，用于日志记录）
 
 **缓存优化：**
 - `make download` 会检查 `dl` 目录，跳过已下载的文件
@@ -173,6 +166,8 @@
 10. **简化的输入参数**: Step 2只需要输入step1-full artifact名称，无需额外的配置文件参数
 
 11. **repo_flag文件**: 用于缓存管理，确保不同代码仓库的缓存不会冲突，必须保留
+
+12. **简化的artifact结构**: 移除了重复的config artifact，只保留在step1-full中
 
 ## 故障排除
 

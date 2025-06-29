@@ -163,14 +163,6 @@ jobs:
             echo "CONFIG_CHANGED=false" >> $GITHUB_ENV
           fi
 
-      - name: Upload Config Artifacts (if changed)
-        if: env.CONFIG_CHANGED == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: config-${{ env.BUILD_DATE }}-${{ inputs.model }}
-          path: ./config.zip
-          retention-days: 7
-
       - name: Upload Build Info Artifacts
         uses: actions/upload-artifact@v4
         with:
