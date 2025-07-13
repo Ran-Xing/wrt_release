@@ -60,8 +60,20 @@ if [[ -d $TARGET_DIR ]]; then
     find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec rm -f {} +
 fi
 
-make download -j$(($(nproc) * 2))
-make -j$(($(nproc) + 1)) || make -j1 V=s
+# 执行make download，如果失败则退出
+if ! make download -j$(($(nproc) * 2)); then
+    echo "❌ make download 失败"
+    exit 1
+fi
+
+# 执行make构建，如果失败则尝试单线程构建
+if ! make -j$(($(nproc) + 1)); then
+    echo "⚠️  多线程构建失败，尝试单线程构建..."
+    if ! make -j1 V=s; then
+        echo "❌ 单线程构建也失败"
+        exit 1
+    fi
+fi
 
 FIRMWARE_DIR="$BASE_PATH/firmware"
 \rm -rf "$FIRMWARE_DIR"

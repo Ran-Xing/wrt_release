@@ -1,0 +1,349 @@
+name: Build OpenWrt Firmware
+run-name: Build - ${{ inputs.model }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs-on:
+        required: true
+        description: '选择运行容器'
+        type: choice
+        default: ubuntu-22.04
+        options:
+          - ubuntu-20.04
+          - ubuntu-22.04
+      model:
+        description: '选择设备型号'
+        required: true
+        type: choice
+        default: jdcloud_ipq60xx_immwrt
+        options:
+          - aliyun_ap8220_immwrt
+          - cmcc_rax3000m_immwrt
+          - jdcloud_ax6000_immwrt
+          - jdcloud_ipq60xx_immwrt
+          - jdcloud_ipq60xx_libwrt
+          - redmi_ax5_immwrt
+          - redmi_ax6_immwrt
+          - redmi_ax6_libwrt
+          - redmi_ax6000_immwrt21
+          - zn_m2_immwrt
+          - zn_m2_libwrt
+          - x64_immwrt
+      enable_ssh:
+        description: '启用SSH访问 (易封号)'
+        required: false
+        type: boolean
+        default: false
+      use_artifacts:
+        description: '使用现有工件（失败重试）'
+        required: false
+        type: boolean
+        default: false
+      use_mnt:
+        description: '使用/mnt目录用于编译,避免硬盘空间不足'
+        required: false
+        type: boolean
+        default: false
+
+# 设置权限
+#permissions:
+#  contents: read
+#  actions: write
+#  packages: write
+
+env:
+    BUILD_DIR: action_build                # 构建目录
+    TIMEZONE: "Asia/Shanghai"              # 时区
+    ARTIFACT_RETENTION_DAYS: 7             # 工件保留天数
+    SSH_TIMEOUT_MINUTES: 180               # SSH超时时间（分钟）
+    WORKFLOW_FILE: build-wrt.yml           # 工作流文件名
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub Token
+    ARTIFACT_NAME: ${{ inputs.runs-on }}-${{ inputs.model }} # 工件名称
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runs-on }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Maximize build space
+        if: inputs.use_mnt != true
+        uses: AdityaGarg8/remove-unwanted-software@v5
+        with:
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+          remove-large-packages: "true"
+          remove-cached-tools: "true"
+          remove-swapfile: "true"
+
+      - name: Before freeing up disk space
+        run: |
+          if ${{ inputs.use_mnt }} == 'true'; then
+             SRC_DIR="${{ github.workspace }}"
+             rm -rf "$SRC_DIR"
+             sudo mkdir /mnt/wrt_release
+             sudo chown $USER:$GROUPS /mnt/wrt_release
+             ln -sf /mnt/wrt_release "$SRC_DIR"
+             ls -ld "$SRC_DIR"
+          fi
+          
+          echo "Before freeing up disk space"
+          echo "=============================================================================="
+          df -hT
+          echo "=============================================================================="
+
+      - name: 获取最新工件ID（带循环检查）
+        if: inputs.use_artifacts == true
+        id: get-run-id
+        run: |
+          echo "GET_RUN_ID_STATUS=false" >> $GITHUB_ENV
+          RUN_IDS=$(gh run list --repo ${{ github.repository }} --workflow ${{ env.WORKFLOW_FILE }} --branch ${{ github.ref_name }} --limit 10 --json databaseId --jq '.[].databaseId' | head -5)
+          
+          if [ -z "$RUN_IDS" ]; then
+            echo "❌ 在分支 ${{ github.ref_name }} 上未找到成功的工作流运行"
+            echo "将重新构建项目"
+            exit 0
+          fi
+    
+          for RUN_ID in $RUN_IDS; do
+            echo "检查运行 $RUN_ID 中的工件 '${{ env.ARTIFACT_NAME }}'..."
+            
+            ARTIFACT_INFO=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
+              --jq ".artifacts[] | select(.name == \"${{ env.ARTIFACT_NAME }}\" and .expired == false) | {id: .id, size: .size_in_bytes}" 2>/dev/null)
+            
+            if [ -n "$ARTIFACT_INFO" ]; then
+               ARTIFACT_ID=$(echo "$ARTIFACT_INFO" | jq -r '.id')
+               ARTIFACT_SIZE_BYTES=$(echo "$ARTIFACT_INFO" | jq -r '.size')
+               ARTIFACT_SIZE_MB=$(echo "scale=2; $ARTIFACT_SIZE_BYTES / 1024 / 1024" | bc)
+               
+               echo "找到有效工件 ${{ env.ARTIFACT_NAME }}: ID=$ARTIFACT_ID, 大小=${ARTIFACT_SIZE_MB}MB (运行ID=$RUN_ID)"
+               echo "run-id=$RUN_ID" >> "$GITHUB_OUTPUT"
+               echo "GET_RUN_ID_STATUS=true" >> $GITHUB_ENV
+               exit 0
+             fi
+          done
+          
+          echo "❌ 在最近5次成功运行中未找到有效工件 ${{ env.ARTIFACT_NAME }}"
+          echo "将重新构建项目"
+
+      - name: Download Artifact
+        if: inputs.use_artifacts == true && env.GET_RUN_ID_STATUS == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          github-token: ${{ env.GH_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.get-run-id.outputs.run-id }}
+
+      - name: Initialization Artifact
+        if: inputs.use_artifacts == true && env.GET_RUN_ID_STATUS == 'true'
+        run: |
+          tar -xzf ${{ env.ARTIFACT_NAME }}.tar.gz
+          rm -f ${{ env.ARTIFACT_NAME }}.tar.gz
+          
+          if [ ! -d "./${{ env.BUILD_DIR }}" ]; then
+            echo "❌ 未找到artifact的完整项目"
+            echo "工件可能损坏或不完整，将重新构建"
+          fi
+
+      - name: Checkout
+        if: inputs.use_artifacts != true || env.GET_RUN_ID_STATUS != 'true'
+        uses: actions/checkout@v4
+
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo -E apt -yqq install dos2unix
+          sudo -E apt -yqq install libfuse-dev
+          sudo -E apt -yqq autoremove --purge
+          sudo -E apt -yqq autoclean
+          sudo -E apt -yqq clean
+          sudo -E systemctl daemon-reload
+          sudo -E timedatectl set-timezone "${{ env.TIMEZONE }}"
+
+      - name: Initialization Values
+        run: |
+          export BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+
+      - name: Pre Clone
+        if: inputs.use_artifacts != true || env.GET_RUN_ID_STATUS != 'true'
+        run: ./pre_clone_action.sh ${{ inputs.model }}
+
+      - name: Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./action_build/.ccache
+            ./action_build/staging_dir
+          key: ${{ inputs.runs-on }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}
+          restore-keys: |
+            ${{ inputs.runs-on }}-${{ hashFiles('**/repo_flag') }}-
+
+      - name: Refresh the cache
+        run: |
+          if [ -d "./action_build/staging_dir" ]; then
+            find "./action_build/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r dir; do
+                find "$dir" -type f -exec touch {} +
+            done
+          fi
+
+      - name: Before defconfig @build.sh
+        run: |
+          BASE_PATH="${PWD}"
+
+          Dev="${{ inputs.model }}"
+          Build_Mod=$2
+
+          CONFIG_FILE="$BASE_PATH/deconfig/$Dev.config"
+          INI_FILE="$BASE_PATH/compilecfg/$Dev.ini"
+
+          if [[ ! -f $CONFIG_FILE ]]; then
+              echo "Config not found: $CONFIG_FILE"
+              exit 1
+          fi
+
+          if [[ ! -f $INI_FILE ]]; then
+              echo "INI file not found: $INI_FILE"
+              exit 1
+          fi
+
+          read_ini_by_key() {
+              local key=$1
+              awk -F"=" -v key="$key" '$1 == key {print $2}' "$INI_FILE"
+          }
+
+          REPO_URL=$(read_ini_by_key "REPO_URL")
+          REPO_BRANCH=$(read_ini_by_key "REPO_BRANCH")
+          REPO_BRANCH=${REPO_BRANCH:-main}
+          BUILD_DIR=$(read_ini_by_key "BUILD_DIR")
+          COMMIT_HASH=$(read_ini_by_key "COMMIT_HASH")
+          COMMIT_HASH=${COMMIT_HASH:-none}
+
+          if [[ -d $BASE_PATH/action_build ]]; then
+              BUILD_DIR="action_build"
+          fi
+
+          $BASE_PATH/update.sh "$REPO_URL" "$REPO_BRANCH" "$BASE_PATH/$BUILD_DIR" "$COMMIT_HASH"
+          \cp -f "$CONFIG_FILE" "$BASE_PATH/$BUILD_DIR/.config"
+          
+          if [[ ! -d package/luci-theme-design ]]; then
+            git clone https://github.com/gngpp/luci-theme-design.git  package/luci-theme-design
+          fi
+
+          echo "BASE_PATH=$BASE_PATH" >> $GITHUB_ENV
+          echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
+          echo "CONFIG_FILE=$CONFIG_FILE" >> $GITHUB_ENV
+
+      - name: SSH connection to Actions (before defconfig)
+        uses: mxschmitt/action-tmate@v3
+        if: github.event_name == 'workflow_dispatch' && inputs.enable_ssh == true
+        timeout-minutes: ${{ env.SSH_TIMEOUT_MINUTES }}
+        with:
+          limit-access-to-actor: true
+
+      - name: Download & Build @build.sh
+        run: |
+          cd ./${{ env.BUILD_DIR }}
+          make defconfig
+          
+          # x86_64 特殊 sed
+          if grep -qE "^CONFIG_TARGET_x86_64=y" "${{ env.CONFIG_FILE }}"; then
+            DISTFEEDS_PATH="${{ env.BASE_PATH }}/${{ env.BUILD_DIR }}/package/emortal/default-settings/files/99-distfeeds.conf"
+            if [ -d "${DISTFEEDS_PATH%/*}" ] && [ -f "$DISTFEEDS_PATH" ]; then
+              sed -i 's/aarch64_cortex-a53/x86_64/g' "$DISTFEEDS_PATH"
+            fi
+          fi
+
+          if [[ $Build_Mod == "debug" ]]; then
+            exit 0
+          fi
+
+          # 清理旧固件
+          TARGET_DIR="${{ env.BASE_PATH }}/${{ env.BUILD_DIR }}/bin/targets"
+          if [[ -d $TARGET_DIR ]]; then
+            find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec rm -f {} +
+          fi
+          
+          # 执行make download，如果失败则退出
+          if ! make download -j$(($(nproc) * 2)); then
+            echo "Build_Status=false" >> $GITHUB_ENV
+            echo "❌ 依赖下载失败！"
+            echo "可能原因：网络问题、源地址不可用或依赖包版本冲突"
+          fi
+
+          # 执行make构建，如果失败则尝试单线程构建
+          if ! make -j$(($(nproc) + 1)); then
+            echo "⚠️  多线程构建失败，尝试单线程构建..."
+            if ! make -j1 V=s; then
+              echo "Build_Status=false" >> $GITHUB_ENV
+              echo "❌ 单线程构建也失败"
+              echo "可能原因：编译环境问题、内存不足或代码错误"
+            fi
+          fi
+          
+          echo "TARGET_DIR=${TARGET_DIR}" >> $GITHUB_ENV
+          cd .. && tar -czf ${{ env.ARTIFACT_NAME }}.tar.gz ./*
+
+      - name: Upload Artifacts
+        id: artifact-upload-step
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_NAME }}.tar.gz
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Check Firmware
+        run: |
+          if [[ "${{ env.Build_Status }}" == "false" ]]; then
+            echo "编译失败, 请再接再厉!"
+            exit 1
+          fi
+          
+          FIRMWARE_DIR="${{ env.BASE_PATH }}/firmware"
+          \rm -rf "$FIRMWARE_DIR"
+          mkdir -p "$FIRMWARE_DIR"
+          find "${{ env.TARGET_DIR }}" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec cp -f {} "$FIRMWARE_DIR/" \;
+          \rm -f "${{ env.BASE_PATH }}/firmware/Packages.manifest" 2>/dev/null
+          
+          if [[ -d ${{ env.BASE_PATH }}/action_build ]]; then
+            cd ./${{ env.BUILD_DIR }}
+            make clean
+          fi
+
+      - name: Delete Old Cache
+        run: |
+          # 获取缓存列表并删除
+          gh cache list --key ${{ inputs.runs-on }}-${{ hashFiles('**/repo_flag') }}- --json key --jq '.[] | .key' | while read -r key; do
+            gh cache delete "$key"
+          done
+          # 输出缓存状态
+          echo "========cache status========"
+          echo "ccache: $(du -sh ./action_build/.ccache | cut -f 1)"
+          echo "staging: $(du -sh ./action_build/staging_dir | cut -f 1)"
+
+      - name: Machine Information
+        run: |
+          echo "=============================================="
+          lscpu | grep -E "name|Core|Thread"
+          echo "=============================================="
+          df -h
+          echo "=============================================="
+          # 输出缓存状态
+          echo "========cache status========"
+          echo "ccache: $(du -sh ./${{ env.BUILD_DIR }}/.ccache 2>/dev/null | cut -f 1 || echo 'N/A')"
+          echo "staging: $(du -sh ./${{ env.BUILD_DIR }}/staging_dir 2>/dev/null | cut -f 1 || echo 'N/A')"
+          echo "dl: $(du -sh ./${{ env.BUILD_DIR }}/dl 2>/dev/null | cut -f 1 || echo 'N/A')"
+
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUILD_DATE }}_${{ inputs.model }}
+          path: ./firmware/*.*
