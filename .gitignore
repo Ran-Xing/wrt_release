@@ -21,3 +21,6 @@ reality_server.json
 xray-client.json
 xray-server.json
 .clineignore
+.DS_Store
+.idea
+自定义插件_编译加速.patch
