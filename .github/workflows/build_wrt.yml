@@ -22,6 +22,11 @@ on:
           - zn_m2_immwrt
           - zn_m2_libwrt
           - x64_immwrt
+      enable_ssh:
+        required: false
+        description: Enable SSH connection for menuconfig
+        type: boolean
+        default: false
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -76,6 +81,13 @@ jobs:
                 find "$dir" -type f -exec touch {} +
             done
           fi
+
+      - name: SSH connection to Actions (before defconfig)
+        uses: mxschmitt/action-tmate@v3
+        if: github.event_name == 'workflow_dispatch' && inputs.enable_ssh == true
+        timeout-minutes: 180
+        with:
+          limit-access-to-actor: true
 
       - name: Build Firmware
         run: ./build.sh ${{ inputs.model }}

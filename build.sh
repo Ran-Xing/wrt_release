@@ -58,7 +58,7 @@ remove_uhttpd_dependency() {
 apply_config() {
     # 复制基础配置文件
     \cp -f "$CONFIG_FILE" "$BASE_PATH/$BUILD_DIR/.config"
-    
+
     # 如果是 ipq60xx 或 ipq807x 平台，则追加 NSS 配置
     if grep -qE "(ipq60xx|ipq807x)" "$BASE_PATH/$BUILD_DIR/.config"; then
         cat "$BASE_PATH/deconfig/nss.config" >> "$BASE_PATH/$BUILD_DIR/.config"
@@ -83,6 +83,9 @@ $BASE_PATH/update.sh "$REPO_URL" "$REPO_BRANCH" "$BASE_PATH/$BUILD_DIR" "$COMMIT
 
 apply_config
 remove_uhttpd_dependency
+
+Airtest_PATH="$BASE_PATH/$BUILD_DIR/package/python3-airtest"
+\cp -f patches/Airtest_Makefile "${Airtest_PATH}/Makefile"
 
 cd "$BASE_PATH/$BUILD_DIR"
 make defconfig
@@ -109,7 +112,7 @@ make -j$(($(nproc) + 1)) || make -j1 V=s
 FIRMWARE_DIR="$BASE_PATH/firmware"
 \rm -rf "$FIRMWARE_DIR"
 mkdir -p "$FIRMWARE_DIR"
-find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec cp -f {} "$FIRMWARE_DIR/" \;
+find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" -o -name "*imagebuilder*.tar*" \) -exec cp -f {} "$FIRMWARE_DIR/" \;
 \rm -f "$BASE_PATH/firmware/Packages.manifest" 2>/dev/null
 
 if [[ -d $BASE_PATH/action_build ]]; then

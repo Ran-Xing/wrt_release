@@ -1,0 +1,31 @@
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=python3-airtest
+PKG_VERSION:=latest
+PKG_RELEASE:=1
+
+PKG_BUILD_DEPENDS:=python3
+
+include $(INCLUDE_DIR)/package.mk
+
+define Package/python3-airtest
+  SECTION:=lang
+  CATEGORY:=Languages
+  TITLE:=Python3 Airtest
+  DEPENDS:=+python3 +python3-pip
+endef
+
+define Package/python3-airtest/description
+Airtest automation framework for OpenWrt Python3
+endef
+
+define Build/Compile
+	# 使用 pip 安装到包的临时安装目录
+	$(call Build/Compile/Py3Package,pip install --prefix=$(PKG_INSTALL_DIR)/usr/local airtest)
+endef
+
+define Package/python3-airtest/install
+	# 文件已经在 PKG_INSTALL_DIR 里，无需额外操作
+endef
+
+$(eval $(call BuildPackage,python3-airtest))
