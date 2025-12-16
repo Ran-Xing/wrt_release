@@ -93,6 +93,13 @@ update_feeds() {
         echo "src-git small8 https://github.com/kenzok8/small-package" >>"$FEEDS_PATH"
     fi
 
+    # 检查并添加 qmodem 源
+    if ! grep -q "qmodem" "$BUILD_DIR/$FEEDS_CONF"; then
+        # 确保文件以换行符结尾
+        [ -z "$(tail -c 1 "$BUILD_DIR/$FEEDS_CONF")" ] || echo "" >>"$BUILD_DIR/$FEEDS_CONF"
+        echo 'src-git qmodem https://github.com/FUjr/QModem.git;main' >> "$BUILD_DIR/$FEEDS_CONF"
+    fi
+
     # 添加bpf.mk解决更新报错
     if [ ! -f "$BUILD_DIR/include/bpf.mk" ]; then
         touch "$BUILD_DIR/include/bpf.mk"
@@ -698,6 +705,40 @@ update_mosdns_deconfig() {
     fi
 }
 
+# 修复 RMNET 和 WWAN 依赖问题
+# 参考: https://github.com/qosmio/nss-packages/pull/69
+fix_rmnet_wwan_dependency() {
+    echo "正在应用 RMNET 和 WWAN 依赖修复..."
+    
+    # 修复 qca-nss-drv Config.in
+    local nss_drv_config="$BUILD_DIR/feeds/nss_packages/qca-nss-drv/Config.in"
+    if [ -f "$nss_drv_config" ]; then
+        # 当启用 kmod-qmi_wwan_q 时自动启用 RMNET
+        if grep -q "config NSS_DRV_RMNET_ENABLE" "$nss_drv_config"; then
+            sed -i '/config NSS_DRV_RMNET_ENABLE/,/default n/ {
+                s/default n/default y if PACKAGE_kmod-qmi_wwan_q/
+            }' "$nss_drv_config"
+            echo "已修复 qca-nss-drv RMNET 依赖配置"
+        fi
+    fi
+    
+    # 修复 qca-nss-ecm Makefile
+    local nss_ecm_makefile="$BUILD_DIR/feeds/nss_packages/qca-nss-ecm/Makefile"
+    if [ -f "$nss_ecm_makefile" ]; then
+        # 只在 ipq807x 和 ipq50xx 平台上启用 RAWIP
+        if grep -q "ifneq (\$(CONFIG_PACKAGE_kmod-qmi_wwan_q),)" "$nss_ecm_makefile"; then
+            # 检查是否已经应用过修复
+            if ! grep -q "findstring.*ipq807x.*ipq50xx" "$nss_ecm_makefile"; then
+                sed -i '/ifneq (\$(CONFIG_PACKAGE_kmod-qmi_wwan_q),)/a\
+ifneq (, $(findstring $(CONFIG_TARGET_SUBTARGET), "ipq807x" "ipq50xx"))' "$nss_ecm_makefile"
+                sed -i '/ECM_MAKE_OPTS+=ECM_INTERFACE_RAWIP_ENABLE=y/a\
+endif' "$nss_ecm_makefile"
+                echo "已修复 qca-nss-ecm RAWIP 平台限制"
+            fi
+        fi
+    fi
+}
+
 fix_quickstart() {
     local file_path="$BUILD_DIR/feeds/small8/luci-app-quickstart/luasrc/controller/istore_backend.lua"
     local url="https://gist.githubusercontent.com/puteulanus/1c180fae6bccd25e57eb6d30b7aa28aa/raw/istore_backend.lua"
@@ -1153,6 +1194,7 @@ main() {
     fix_easytier_mk
     remove_attendedsysupgrade
     install_feeds
+    fix_rmnet_wwan_dependency # 修复 RMNET 和 WWAN 依赖问题
     fix_easytier_lua
     update_adguardhome
     update_script_priority
